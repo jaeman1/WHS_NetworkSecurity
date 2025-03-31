@@ -1,76 +1,98 @@
-#include <pcap.h>
 #include <stdio.h>
-#include <netinet/ip.h>
-#include <netinet/tcp.h>
-#include <net/ethernet.h>
-#include <arpa/inet.h>
+#include <pcap.h>
+#include <netinet/ether.h>
+#include <ctype.h>
 
-#define SNAP_LEN 1518  // 최대 캡처 길이
+// 이더넷 해더
+struct ethheader {
+    u_char  ether_dhost[6];    // destination host address
+    u_char  ether_shost[6];    // source host address
+    u_short ether_type;        // IP? ARP? RARP? etc
+};
 
-void packet_handler(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
-    struct ether_header *eth_header = (struct ether_header *)packet;
-    printf("\nEthernet Header:\n");
-    printf("   Src MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           eth_header->ether_shost[0], eth_header->ether_shost[1], eth_header->ether_shost[2],
-           eth_header->ether_shost[3], eth_header->ether_shost[4], eth_header->ether_shost[5]);
-    printf("   Dst MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           eth_header->ether_dhost[0], eth_header->ether_dhost[1], eth_header->ether_dhost[2],
-           eth_header->ether_dhost[3], eth_header->ether_dhost[4], eth_header->ether_dhost[5]);
+// IP 헤더
+struct ipheader {
+    unsigned char      iph_ihl:4,    // IP header length
+                       iph_ver:4;    // IP version
+    unsigned char      iph_tos;      // Type of service
+    unsigned short int iph_len;      // IP Packet length (data + header)
+    unsigned short int iph_ident;    // Identification
+    unsigned short int iph_flag:3,   // Fragmentation flags
+                       iph_offset:13;// Flags offset
+    unsigned char      iph_ttl;      // Time to Live
+    unsigned char      iph_protocol; // Protocol type
+    unsigned short int iph_chksum;   // IP datagram checksum
+    struct  in_addr    iph_sourceip; // Source IP address
+    struct  in_addr    iph_destip;   // Destination IP address
+};
 
-    // IP 헤더
-    struct ip *ip_header = (struct ip *)(packet + sizeof(struct ether_header));
-    printf("\nIP Header:\n");
-    printf("   Src IP: %s\n", inet_ntoa(ip_header->ip_src));
-    printf("   Dst IP: %s\n", inet_ntoa(ip_header->ip_dst));
+// TCP 헤더
+struct tcpheader {
+    u_short tcp_sport;               // Source port
+    u_short tcp_dport;               // Destination port
+    u_int   tcp_seq;                 // Sequence number
+    u_int   tcp_ack;                 // Acknowledgement number
+    u_char  tcp_offx2;               // Data offset, rsvd
+    u_char  tcp_flags;
+    u_short tcp_win;                 // Window size
+    u_short tcp_sum;                 // Checksum
+    u_short tcp_urp;                 // Urgent pointer
+};
 
-    // TCP 프로토콜인지 확인
-    if (ip_header->ip_p == IPPROTO_TCP) {
-        struct tcphdr *tcp_header = (struct tcphdr *)(packet + sizeof(struct ether_header) + (ip_header->ip_hl * 4));
+void packet_capture(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
 
-        printf("\nTCP Header:\n");
-        printf("   Src Port: %d\n", ntohs(tcp_header->source));
-        printf("   Dst Port: %d\n", ntohs(tcp_header->dest));
+    struct ethheader *eth = (struct ethheader *)packet;
+    struct ipheader *ip = (struct ipheader *)(packet + sizeof(struct ethheader));
+    
+    // IP헤더는 가변적일 수 있으므로 값을 계산하는 과정 추가
+    int ip_header_len=ip->iph_ihl * 4;
+    struct tcpheader *tcp = (struct tcpheader *)(packet + sizeof(struct ethheader) + ip_header_len);
 
-        // 메시지 데이터 출력 (적절한 길이로 제한)
-        const u_char *payload = packet + sizeof(struct ether_header) + (ip_header->ip_hl * 4) + (tcp_header->doff * 4);
-        int payload_size = header->caplen - (payload - packet);
+    int tcp_header_len=(tcp->tcp_offx2 >>4) *4;
+    
+    // 메시지(payload) 부분 찾기
+    const u_char *payload = packet + sizeof(struct ethheader) + ip_header_len + tcp_header_len;
+    int payload_len = ntohs(ip->iph_len) - (ip_header_len + tcp_header_len);
 
-        printf("\nMessage (Payload):\n");
-        if (payload_size > 0) {
-            for (int i = 0; i < (payload_size < 50 ? payload_size : 50); i++) {  // 최대 50바이트만 출력
-                printf("%c", isprint(payload[i]) ? payload[i] : '.');
-            }
-            printf("\n");
-        } else {
-            printf("   No Payload\n");
+    // Ethernet 정보 출력
+    printf("Source MAC: %s\n", ether_ntoa((struct ether_addr *)eth->ether_shost));
+    printf("Destination MAC: %s\n", ether_ntoa((struct ether_addr *)eth->ether_dhost));
+
+    // IP 정보 출력
+    printf("Source IP: %s\n", inet_ntoa(ip->iph_sourceip));
+    printf("Destination IP: %s\n", inet_ntoa(ip->iph_destip));
+
+    // TCP 포트 정보 출력
+    printf("Source Port: %d\n", ntohs(tcp->tcp_sport));
+    printf("Destination Port: %d\n", ntohs(tcp->tcp_dport));
+
+    // 메시지(payload) 출력
+    if (payload_len > 0) {
+        printf("Payload (%d bytes): ", payload_len);
+        for (int i = 0; i < payload_len; i++) {
+            printf("%c", isprint(payload[i]) ? payload[i] : '.'); // 출력 가능 문자만 표시
         }
+        printf("\n");
     } else {
-        printf("   Non-TCP packet, skipping...\n");
+        printf("No payload data available\n");
     }
+
+    printf("\n");
 }
 
 int main() {
-    char errbuf[PCAP_ERRBUF_SIZE];  // 에러 메시지 저장용
     pcap_t *handle;
+    char errbuf[PCAP_ERRBUF_SIZE];
 
-    // 디바이스 설정
-    char *device = pcap_lookupdev(errbuf);
-    if (device == NULL) {
-        fprintf(stderr, "Couldn't find default device: %s\n", errbuf);
-        return 1;
-    }
-    printf("Using device: %s\n", device);
-
-    // 디바이스 열기
-    handle = pcap_open_live(device, SNAP_LEN, 1, 1000, errbuf);
+    handle = pcap_open_live("enp0s3", BUFSIZ, 1, 1000, errbuf);
     if (handle == NULL) {
-        fprintf(stderr, "Couldn't open device %s: %s\n", device, errbuf);
+        fprintf(stderr, "Failed to open device: %s\n", errbuf);
         return 1;
     }
 
-    // 패킷 캡처
-    pcap_loop(handle, 10, packet_handler, NULL);
+    pcap_loop(handle, 0, packet_capture, NULL);
 
     pcap_close(handle);
+
     return 0;
 }
